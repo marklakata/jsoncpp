@@ -501,6 +501,13 @@ const char* Value::asCString() const {
   return value_.string_;
 }
 
+bool Value::getString(char const** str, unsigned* length) const {
+  if (type_ != stringValue) return false;
+  if (value_.string_ == 0) return false;
+  decodePrefixedString(this->value_.string_, length, str);
+  return true;
+}
+
 std::string Value::asString() const {
   switch (type_) {
   case nullValue:

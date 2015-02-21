@@ -254,6 +254,11 @@ Json::Value obj_value(Json::objectValue); // {}
 
   const char* asCString() const; ///! Embedded zeroes could cause you trouble!
   std::string asString() const; ///! Embedded zeroes are possible.
+  /** Get raw char* and length of string-value.
+   *  Return false if !string or char* is NULL.
+   */
+  bool getString(
+      char const** str, unsigned* length) const;
 #ifdef JSON_USE_CPPTL
   CppTL::ConstString asConstString() const;
 #endif
