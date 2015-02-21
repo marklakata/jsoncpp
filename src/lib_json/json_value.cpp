@@ -102,27 +102,32 @@ static inline char* duplicateStringValue(const char* value,
 
 /* Record the length as a prefix.
  */
-static inline char* duplicatePrefixedStringValue(
+static inline char* duplicateAndPrefixStringValue(
     const char* value,
-    unsigned int length = unknown)
+    unsigned int length)
 {
-  if (length == unknown)
-    length = (unsigned int)strlen(value);
-
   // Avoid an integer overflow in the call to malloc below by limiting length
   // to a sane value.
-  if (length >= (unsigned)Value::maxInt)
-    length = Value::maxInt - 1;
-
-  char* newString = static_cast<char*>(malloc(length + 1));
+  JSON_ASSERT_MESSAGE(length <= (unsigned)Value::maxInt - sizeof(unsigned) - 1U,
+                      "in Json::Value::duplicateAndPrefixStringValue(): "
+                      "length too big for prefixing");
+  unsigned actualLength = length + sizeof(unsigned) + 1U;
+  char* newString = static_cast<char*>(malloc(actualLength));
   JSON_ASSERT_MESSAGE(newString != 0,
-                      "in Json::Value::duplicateStringValue(): "
+                      "in Json::Value::duplicateAndPrefixStringValue(): "
                       "Failed to allocate string value buffer");
-  memcpy(newString, value, length);
-  newString[length] = 0;
+  *reinterpret_cast<unsigned*>(newString) = length;
+  memcpy(newString + sizeof(unsigned), value, length);
+  newString[actualLength - 1U] = 0; // to avoid buffer over-run accidents by users later
   return newString;
 }
-/** Free the string duplicated by duplicateStringValue().
+static void decodePrefixedString(char const* prefixed,
+    unsigned* length, char const** value)
+{
+  *length = *reinterpret_cast<unsigned const*>(prefixed);
+  *value = prefixed + sizeof(unsigned);
+}
+/** Free the string duplicated by duplicateStringValue()/duplicateAndPrefixStringValue().
  */
 static inline void releaseStringValue(char* value) { free(value); }
 
@@ -295,19 +300,19 @@ Value::Value(double value) {
 
 Value::Value(const char* value) {
   initBasic(stringValue, true);
-  value_.string_ = duplicateStringValue(value);
+  value_.string_ = duplicateAndPrefixStringValue(value, strlen(value));
 }
 
 Value::Value(const char* beginValue, const char* endValue) {
   initBasic(stringValue, true);
   value_.string_ =
-      duplicateStringValue(beginValue, (unsigned int)(endValue - beginValue));
+      duplicateAndPrefixStringValue(beginValue, (unsigned int)(endValue - beginValue));
 }
 
 Value::Value(const std::string& value) {
   initBasic(stringValue, true);
   value_.string_ =
-      duplicateStringValue(value.c_str(), (unsigned int)value.length());
+      duplicateAndPrefixStringValue(value.data(), (unsigned int)value.length());
 }
 
 Value::Value(const StaticString& value) {
@@ -341,7 +346,11 @@ Value::Value(const Value& other)
     break;
   case stringValue:
     if (other.value_.string_) {
-      value_.string_ = duplicateStringValue(other.value_.string_);
+      unsigned len;
+      char const* str;
+      decodePrefixedString(other.value_.string_,
+          &len, &str);
+      value_.string_ = duplicateAndPrefixStringValue(str, len);
       allocated_ = true;
     } else {
       value_.string_ = 0;
@@ -438,9 +447,23 @@ bool Value::operator<(const Value& other) const {
   case booleanValue:
     return value_.bool_ < other.value_.bool_;
   case stringValue:
-    return (value_.string_ == 0 && other.value_.string_) ||
-           (other.value_.string_ && value_.string_ &&
-            strcmp(value_.string_, other.value_.string_) < 0);
+  {
+    if ((value_.string_ == 0) || (other.value_.string_ == 0)) {
+      if (other.value_.string_) return true;
+      else return false;
+    }
+    unsigned this_len;
+    unsigned other_len;
+    char const* this_str;
+    char const* other_str;
+    decodePrefixedString(this->value_.string_, &this_len, &this_str);
+    decodePrefixedString(other.value_.string_, &other_len, &other_str);
+    unsigned min_len = std::min(this_len, other_len);
+    int comp = memcmp(this_str, other_str, min_len);
+    if (comp < 0) return true;
+    if (comp > 0) return false;
+    return (this_len < other_len);
+  }
   case arrayValue:
   case objectValue: {
     int delta = int(value_.map_->size() - other.value_.map_->size());
@@ -480,9 +503,20 @@ bool Value::operator==(const Value& other) const {
   case booleanValue:
     return value_.bool_ == other.value_.bool_;
   case stringValue:
-    return (value_.string_ == other.value_.string_) ||
-           (other.value_.string_ && value_.string_ &&
-            strcmp(value_.string_, other.value_.string_) == 0);
+  {
+    if ((value_.string_ == 0) || (other.value_.string_ == 0)) {
+      return (value_.string_ == other.value_.string_);
+    }
+    unsigned this_len;
+    unsigned other_len;
+    char const* this_str;
+    char const* other_str;
+    decodePrefixedString(this->value_.string_, &this_len, &this_str);
+    decodePrefixedString(other.value_.string_, &other_len, &other_str);
+    if (this_len != other_len) return false;
+    int comp = memcmp(this_str, other_str, this_len);
+    return comp == 0;
+  }
   case arrayValue:
   case objectValue:
     return value_.map_->size() == other.value_.map_->size() &&
@@ -498,7 +532,11 @@ bool Value::operator!=(const Value& other) const { return !(*this == other); }
 const char* Value::asCString() const {
   JSON_ASSERT_MESSAGE(type_ == stringValue,
                       "in Json::Value::asCString(): requires stringValue");
-  return value_.string_;
+  if (value_.string_ == 0) return 0;
+  unsigned this_len;
+  char const* this_str;
+  decodePrefixedString(this->value_.string_, &this_len, &this_str);
+  return this_str;
 }
 
 bool Value::getString(char const** str, unsigned* length) const {
@@ -513,7 +551,13 @@ std::string Value::asString() const {
   case nullValue:
     return "";
   case stringValue:
-    return value_.string_ ? value_.string_ : "";
+  {
+    if (value_.string_ == 0) return "";
+    unsigned this_len;
+    char const* this_str;
+    decodePrefixedString(this->value_.string_, &this_len, &this_str);
+    return std::string(this_str, this_len);
+  }
   case booleanValue:
     return value_.bool_ ? "true" : "false";
   case intValue:
