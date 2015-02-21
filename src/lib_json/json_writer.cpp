@@ -143,7 +143,11 @@ std::string valueToQuotedString(const char* value) {
       result += "\\\"";
       break;
     case '\\':
-      result += "\\\\";
+      if (*(c+1) != 0  &&
+          *(c+1) == 'u')
+        result += *c;
+      else
+        result += "\\\\";
       break;
     case '\b':
       result += "\\b";
